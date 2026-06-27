@@ -25,8 +25,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-182^rn+ijw-a&qge-&zx!h$9uh2r(p(95(yamzg!$!2zqp+9m)')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-# Membaca status DEBUG dari file .env
-DEBUG = os.environ.get('DEBUG', 'False') == 'True'
+# Praktikum: DEBUG=True diperlukan agar Django Silk dapat merekam query
+DEBUG = True  # os.environ.get('DEBUG', 'False') == 'True'
 
 # Mengizinkan akses dari localhost dan container Docker
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0']
@@ -41,10 +41,11 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'core',
+    'core', 'silk', 'api',
 ]
 
 MIDDLEWARE = [
+    'silk.middleware.SilkyMiddleware', # Pindahkan ke paling atas!
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -78,17 +79,26 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
-# Mengubah konfigurasi database dari SQLite ke PostgreSQL menggunakan environment variables
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ.get('DB_NAME'),
-        'USER': os.environ.get('DB_USER'),
-        'PASSWORD':  os.environ.get('DB_PASSWORD'),
-        'HOST': os.environ.get('DB_HOST'),
-        'PORT': os.environ.get('DB_PORT', '5432'),
+# Auto-detect: gunakan PostgreSQL jika DB_HOST di-set, SQLite untuk dev lokal
+if os.environ.get('DB_HOST'):
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.environ.get('DB_NAME'),
+            'USER': os.environ.get('DB_USER'),
+            'PASSWORD':  os.environ.get('DB_PASSWORD'),
+            'HOST': os.environ.get('DB_HOST'),
+            'PORT': os.environ.get('DB_PORT', '5432'),
+        }
     }
-}
+else:
+    # Fallback SQLite untuk development lokal tanpa Docker
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 
 # Password validation
@@ -135,3 +145,18 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 AUTH_USER_MODEL = 'core.User'
+
+# ============================================================
+# Django Silk - Query Profiling Configuration
+# ============================================================
+SILKY_PYTHON_PROFILER = True          # Aktifkan profiler Python
+SILKY_ANALYZE_QUERIES = True          # Analisis query SQL otomatis
+SILKY_INTERCEPT_PERCENT = 100         # Record 100% dari semua request
+SILKY_MAX_RECORDED_REQUESTS = 10_000  # Simpan hingga 10.000 request
+
+# ============================================================
+# JWT Configuration (digunakan oleh api/auth.py)
+# ============================================================
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES = 60   # 1 jam
+JWT_REFRESH_TOKEN_EXPIRE_DAYS   = 7    # 7 hari
+JWT_ALGORITHM = 'HS256'
