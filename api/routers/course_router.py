@@ -1,12 +1,17 @@
 """
 api/routers/course_router.py
-Endpoints untuk manajemen Course
+Endpoints untuk manajemen Course — dengan Redis Caching
 
-GET  /api/courses             - List courses (publik, pagination + filter)
-GET  /api/courses/{id}        - Detail course (publik)
-POST /api/courses             - Buat course (Instructor only)
-PATCH /api/courses/{id}       - Update course (Owner only)
-DELETE /api/courses/{id}      - Hapus course (Admin only)
+GET  /api/courses             - List courses (publik, pagination + filter) [CACHED 5 min]
+GET  /api/courses/{id}        - Detail course (publik)                      [CACHED 10 min]
+POST /api/courses             - Buat course (Instructor only)               [Invalidate cache]
+PATCH /api/courses/{id}       - Update course (Owner only)                  [Invalidate cache]
+DELETE /api/courses/{id}      - Hapus course (Admin only)                   [Invalidate cache]
+
+Caching Strategy:
+  - Cache miss  → query DB → serialize → simpan ke Redis
+  - Cache hit   → return langsung dari Redis (tanpa DB query)
+  - Invalidasi  → hapus key terkait pada write operations
 """
 
 from typing import Optional
@@ -21,6 +26,8 @@ from api.schemas import (
     CourseIn, CourseUpdateIn, CourseOut, CourseListOut,
     PaginatedCourseOut, MessageOut,
 )
+from services import cache as course_cache
+from services.mongodb import log_activity
 
 router = Router(tags=["Courses"])
 
@@ -39,10 +46,15 @@ def list_courses(
 ):
     """
     Ambil daftar course dengan pagination dan opsional filter.
-    - **search**: cari berdasarkan kata dalam judul
-    - **category_id**: filter by kategori
-    - **instructor_id**: filter by instruktur
+    Response di-cache di Redis selama **5 menit**.
+    Cache otomatis di-invalidasi saat ada course baru / update / delete.
     """
+    # ── Cache Check ──
+    cached = course_cache.get_course_list(page, page_size, search, category_id, instructor_id)
+    if cached is not None:
+        return PaginatedCourseOut.model_validate(cached)
+
+    # ── DB Query ──
     qs = Course.objects.select_related("category", "instructor").all()
 
     if search:
@@ -52,18 +64,23 @@ def list_courses(
     if instructor_id:
         qs = qs.filter(instructor_id=instructor_id)
 
-    qs = qs.order_by("-created_at")
+    qs    = qs.order_by("-created_at")
     total = qs.count()
-
     offset = (page - 1) * page_size
-    courses = qs[offset: offset + page_size]
+    courses = list(qs[offset: offset + page_size])
 
-    return PaginatedCourseOut(
-        total=total,
-        page=page,
-        page_size=page_size,
-        results=list(courses),
+    result = PaginatedCourseOut(
+        total=total, page=page, page_size=page_size,
+        results=courses,
     )
+
+    # ── Store to Cache ──
+    course_cache.set_course_list(
+        page, page_size, search, category_id, instructor_id,
+        result.model_dump(mode='json'),
+    )
+
+    return result
 
 
 # ─────────────────────────────────────────────
@@ -73,7 +90,14 @@ def list_courses(
 def get_course(request: HttpRequest, course_id: int):
     """
     Detail satu course lengkap dengan jumlah enrollment.
+    Response di-cache di Redis selama **10 menit**.
     """
+    # ── Cache Check ──
+    cached = course_cache.get_course_detail(course_id)
+    if cached is not None:
+        return CourseOut.model_validate(cached)
+
+    # ── DB Query ──
     try:
         course = (
             Course.objects
@@ -83,6 +107,9 @@ def get_course(request: HttpRequest, course_id: int):
         )
     except Course.DoesNotExist:
         raise HttpError(404, f"Course dengan id={course_id} tidak ditemukan.")
+
+    # ── Store to Cache ──
+    course_cache.set_course_detail(course_id, CourseOut.from_orm(course).model_dump(mode='json'))
 
     return course
 
@@ -95,7 +122,7 @@ def get_course(request: HttpRequest, course_id: int):
 def create_course(request: HttpRequest, data: CourseIn):
     """
     Buat course baru. **Hanya Instructor** yang bisa mengakses endpoint ini.
-    Instructor otomatis menjadi owner dari course yang dibuat.
+    Cache list courses akan di-invalidasi otomatis.
     """
     category = None
     if data.category_id:
@@ -110,8 +137,20 @@ def create_course(request: HttpRequest, data: CourseIn):
         category=category,
         instructor=request.auth,
     )
-    # Re-fetch dengan relasi untuk response
     course = Course.objects.select_related("category", "instructor").get(pk=course.pk)
+
+    # ── Invalidasi cache list ──
+    course_cache.invalidate_all_course_lists()
+
+    # ── Activity Log (MongoDB) ──
+    log_activity(
+        user_id=request.auth.pk,
+        action="CREATE_COURSE",
+        resource_type="course",
+        resource_id=course.pk,
+        metadata={"title": course.title},
+    )
+
     return 201, course
 
 
@@ -123,13 +162,13 @@ def create_course(request: HttpRequest, data: CourseIn):
 def update_course(request: HttpRequest, course_id: int, data: CourseUpdateIn):
     """
     Update sebagian data course. **Hanya instructor pemilik** course ini.
+    Cache detail + list akan di-invalidasi.
     """
     try:
         course = Course.objects.select_related("category", "instructor").get(pk=course_id)
     except Course.DoesNotExist:
         raise HttpError(404, "Course tidak ditemukan.")
 
-    # Ownership check
     if course.instructor_id != request.auth.pk:
         raise HttpError(403, "Anda bukan pemilik course ini.")
 
@@ -150,6 +189,18 @@ def update_course(request: HttpRequest, course_id: int, data: CourseUpdateIn):
     if updated_fields:
         course.save(update_fields=updated_fields)
 
+    # ── Invalidasi cache ──
+    course_cache.invalidate_course(course_id)
+
+    # ── Activity Log ──
+    log_activity(
+        user_id=request.auth.pk,
+        action="UPDATE_COURSE",
+        resource_type="course",
+        resource_id=course_id,
+        metadata={"updated_fields": updated_fields},
+    )
+
     return course
 
 
@@ -161,6 +212,7 @@ def update_course(request: HttpRequest, course_id: int, data: CourseUpdateIn):
 def delete_course(request: HttpRequest, course_id: int):
     """
     Hapus course. **Hanya Admin** yang bisa menghapus course.
+    Cache detail + list akan di-invalidasi.
     """
     try:
         course = Course.objects.get(pk=course_id)
@@ -169,4 +221,17 @@ def delete_course(request: HttpRequest, course_id: int):
 
     title = course.title
     course.delete()
+
+    # ── Invalidasi cache ──
+    course_cache.invalidate_course(course_id)
+
+    # ── Activity Log ──
+    log_activity(
+        user_id=request.auth.pk,
+        action="DELETE_COURSE",
+        resource_type="course",
+        resource_id=course_id,
+        metadata={"title": title},
+    )
+
     return MessageOut(message=f"Course '{title}' berhasil dihapus.")

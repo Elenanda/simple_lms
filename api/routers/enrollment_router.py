@@ -1,10 +1,11 @@
 """
 api/routers/enrollment_router.py
 Endpoints untuk Enrollment & Progress Tracking
+— dengan Celery async tasks & MongoDB logging
 
-POST /api/enrollments                    - Enroll ke course (Student)
+POST /api/enrollments                    - Enroll ke course (Student)  → trigger email task
 GET  /api/enrollments/my-courses         - Daftar course saya (Student)
-POST /api/enrollments/{id}/progress      - Tandai lesson selesai (Student)
+POST /api/enrollments/{id}/progress      - Tandai lesson selesai       → trigger cert task jika 100%
 """
 
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from api.auth import jwt_auth, is_student
 from api.schemas import (
     EnrollIn, EnrollmentOut, ProgressIn, ProgressOut, MessageOut,
 )
+from services.mongodb import log_activity, log_analytics
 
 router = Router(tags=["Enrollments"])
 
@@ -30,7 +32,7 @@ def enroll_course(request: HttpRequest, data: EnrollIn):
     """
     Enroll student ke course.
     **Hanya Student** yang dapat mendaftar.
-    Satu student hanya bisa enroll satu course sekali.
+    Setelah berhasil → Celery mengirim email konfirmasi secara async.
     """
     try:
         course = Course.objects.get(pk=data.course_id)
@@ -40,16 +42,34 @@ def enroll_course(request: HttpRequest, data: EnrollIn):
     if Enrollment.objects.filter(student=request.auth, course=course).exists():
         raise HttpError(400, "Anda sudah terdaftar di course ini.")
 
-    enrollment = Enrollment.objects.create(
-        student=request.auth,
-        course=course,
-    )
-    # Prefetch course relations untuk response
+    enrollment = Enrollment.objects.create(student=request.auth, course=course)
     enrollment = (
         Enrollment.objects
         .select_related("course", "course__category", "course__instructor")
         .get(pk=enrollment.pk)
     )
+
+    # ── Async: Kirim email konfirmasi (Celery) ──
+    try:
+        from tasks.email_tasks import send_enrollment_email
+        send_enrollment_email.delay(request.auth.pk, course.pk)
+    except Exception:
+        pass  # Jangan gagalkan response jika Celery tidak tersedia
+
+    # ── MongoDB: Log activity ──
+    log_activity(
+        user_id=request.auth.pk,
+        action="ENROLL",
+        resource_type="course",
+        resource_id=course.pk,
+        metadata={"course_title": course.title},
+    )
+    log_analytics(
+        event_type="ENROLL",
+        course_id=course.pk,
+        student_id=request.auth.pk,
+    )
+
     return 201, enrollment
 
 
@@ -78,11 +98,9 @@ def my_courses(request: HttpRequest):
 @is_student
 def mark_progress(request: HttpRequest, enrollment_id: int, data: ProgressIn):
     """
-    Tandai sebuah lesson sebagai selesai (atau batalkan) dalam context enrollment tertentu.
-    - **lesson_id**: ID lesson yang ingin ditandai
-    - **is_completed**: true = selesai, false = belum selesai
+    Tandai sebuah lesson sebagai selesai / belum selesai.
+    Jika semua lesson dalam course selesai → Celery generate certificate.
     """
-    # Validasi enrollment milik student ini
     try:
         enrollment = Enrollment.objects.select_related("course").get(
             pk=enrollment_id, student=request.auth
@@ -90,7 +108,6 @@ def mark_progress(request: HttpRequest, enrollment_id: int, data: ProgressIn):
     except Enrollment.DoesNotExist:
         raise HttpError(404, "Enrollment tidak ditemukan atau bukan milik Anda.")
 
-    # Validasi lesson ada di course tersebut
     try:
         lesson = Lesson.objects.get(pk=data.lesson_id, course=enrollment.course)
     except Lesson.DoesNotExist:
@@ -109,6 +126,36 @@ def mark_progress(request: HttpRequest, enrollment_id: int, data: ProgressIn):
     elif data.is_completed:
         progress.completed_at = datetime.now(timezone.utc)
         progress.save(update_fields=["completed_at"])
+
+    # ── MongoDB: Log analytics ──
+    log_analytics(
+        event_type="LESSON_COMPLETE" if data.is_completed else "LESSON_UNCOMPLETE",
+        course_id=enrollment.course.pk,
+        student_id=request.auth.pk,
+        data={"lesson_id": data.lesson_id},
+    )
+
+    # ── Cek apakah semua lesson selesai → trigger certificate ──
+    if data.is_completed:
+        total_lessons     = Lesson.objects.filter(course=enrollment.course).count()
+        completed_lessons = Progress.objects.filter(
+            student=request.auth,
+            lesson__course=enrollment.course,
+            is_completed=True,
+        ).count()
+
+        if total_lessons > 0 and completed_lessons >= total_lessons:
+            try:
+                from tasks.certificate_tasks import generate_certificate
+                generate_certificate.delay(request.auth.pk, enrollment.course.pk)
+            except Exception:
+                pass  # Graceful degrade
+
+            log_analytics(
+                event_type="COURSE_COMPLETE",
+                course_id=enrollment.course.pk,
+                student_id=request.auth.pk,
+            )
 
     return 201, ProgressOut(
         id=progress.pk,

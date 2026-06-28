@@ -5,7 +5,7 @@ Menggunakan Pydantic v2 (bundled dengan django-ninja 1.x)
 """
 
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Any
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
@@ -161,3 +161,20 @@ class MessageOut(BaseModel):
 
 class ErrorOut(BaseModel):
     detail: str
+
+
+# ─────────────────────────────────────────────
+# Reports & Analytics Schemas
+# ─────────────────────────────────────────────
+class TaskStatusOut(BaseModel):
+    """Response untuk status Celery task."""
+    task_id: str
+    status: str   # PENDING | STARTED | SUCCESS | FAILURE
+    result: Optional[Any] = None
+
+
+class CourseAnalyticsOut(BaseModel):
+    """Response untuk aggregasi learning analytics dari MongoDB."""
+    course_id: int
+    course_title: str
+    analytics: dict  # {event_type: {count, students}}

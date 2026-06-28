@@ -1,6 +1,8 @@
 # 🎓 Simple LMS — Django REST API Project
 
-Sistem manajemen pembelajaran (LMS) berbasis **Django 4.2**, lengkap dengan **REST API (Django Ninja)**, **JWT Authentication**, **Role-Based Access Control (RBAC)**, dan **Query Optimization** menggunakan PostgreSQL / SQLite.
+Sistem manajemen pembelajaran (LMS) berbasis **Django 4.2**, lengkap dengan **REST API (Django Ninja)**, **JWT Authentication**, **Role-Based Access Control (RBAC)**, **Redis Caching** (API + standalone lab), **MongoDB Logging**, **Celery Async Tasks**, dan **Query Optimization**.
+
+> **Progress:** Modul 1 (Docker + Models) → Modul 2 (REST API + JWT + RBAC) → Modul 3 (Redis + MongoDB + Celery) → **Modul 4 (Redis Caching Lab ✅)**
 
 ---
 
@@ -13,13 +15,18 @@ Sistem manajemen pembelajaran (LMS) berbasis **Django 4.2**, lengkap dengan **RE
 5. [Authentication System (JWT)](#authentication-system-jwt)
 6. [Role-Based Access Control (RBAC)](#role-based-access-control-rbac)
 7. [Pydantic Schemas](#pydantic-schemas)
-8. [Query Optimization](#query-optimization)
-9. [Swagger UI Documentation](#swagger-ui-documentation)
-10. [Cara Menjalankan Project](#cara-menjalankan-project)
-11. [Docker Setup](#docker-setup)
-12. [Environment Variables](#environment-variables)
-13. [Postman Collection](#postman-collection)
-14. [Screenshots](#screenshots)
+8. [Redis Caching (Django)](#redis-caching)
+9. [Rate Limiting](#rate-limiting)
+10. [MongoDB Activity Logs](#mongodb-activity-logs)
+11. [Celery Async Tasks](#celery-async-tasks)
+12. [Query Optimization](#query-optimization)
+13. [Swagger UI Documentation](#swagger-ui-documentation)
+14. [Docker Setup](#docker-setup)
+15. [Cara Menjalankan Project](#cara-menjalankan-project)
+16. [Environment Variables](#environment-variables)
+17. [Postman Collection](#postman-collection)
+18. [Redis Caching Lab (Standalone)](#redis-caching-lab-standalone)
+19. [Deliverables Summary](#deliverables-summary)
 
 ---
 
@@ -32,10 +39,17 @@ Sistem manajemen pembelajaran (LMS) berbasis **Django 4.2**, lengkap dengan **RE
 | PyJWT | 2.9.0 | JWT token generation & validation |
 | bcrypt | 4.2.0 | Password hashing |
 | email-validator | 2.3.0 | Pydantic EmailStr support |
+| **redis** | **5.0.8** | **Cache client (Python)** |
+| **django-redis** | **5.4.0** | **Django cache backend via Redis** |
+| **pymongo** | **4.7.3** | **MongoDB driver (activity logs)** |
+| **celery** | **5.3.6** | **Async task queue** |
+| **flower** | **2.0.1** | **Celery monitoring UI** |
 | PostgreSQL | 15 | Database produksi (via Docker) |
 | SQLite | bawaan | Database dev lokal |
+| RabbitMQ | 3 | Message broker untuk Celery |
+| MongoDB | 7 | Document store (logs & analytics) |
 | Django Silk | 5.5.0 | Query profiling |
-| Docker + Docker Compose | — | Containerisasi |
+| Docker + Docker Compose | — | Containerisasi (8 services) |
 
 ---
 
@@ -257,11 +271,191 @@ Seluruh schema didefinisikan di `api/schemas.py` menggunakan **Pydantic v2**:
 | `EnrollIn` | `POST /enrollments` |
 | `EnrollmentOut` | Response enrollment |
 | `ProgressIn` / `ProgressOut` | `POST /enrollments/{id}/progress` |
-| `MessageOut` / `ErrorOut` | Generic response |
+| `TaskStatusOut` | Response status Celery task |
+| `CourseAnalyticsOut` | Response MongoDB aggregation |
+
+---
+
+## Redis Caching
+
+### Strategi Caching
+
+| Endpoint | Cache Key | TTL | Invalidasi |
+|---|---|---|---|
+| `GET /api/courses` | `lms:course_list:{hash_params}` | 5 menit | Saat create/update/delete course |
+| `GET /api/courses/{id}` | `lms:course_detail:{id}` | 10 menit | Saat update/delete course tersebut |
+
+### Flow Diagram
+
+```mermaid
+sequenceDiagram
+    Client->>+Django: GET /api/courses?page=1
+    Django->>Redis: cache.get("lms:course_list:abc123")
+    alt Cache HIT
+        Redis-->>Django: PaginatedCourseOut dict
+        Django-->>Client: 200 OK (dari cache, ~1ms)
+    else Cache MISS
+        Redis-->>Django: None
+        Django->>+PostgreSQL: SELECT course + JOIN instructor, category
+        PostgreSQL-->>-Django: QuerySet
+        Django->>Redis: cache.set(key, data, timeout=300)
+        Django-->>-Client: 200 OK (dari DB, ~50ms)
+    end
+
+    Client->>+Django: POST /api/courses (create)
+    Django->>PostgreSQL: INSERT course
+    Django->>Redis: delete_pattern("*course_list:*")
+    Django-->>-Client: 201 Created
+```
+
+### Cache Invalidation (`services/cache.py`)
+
+```python
+# Setelah create / update / delete course:
+course_cache.invalidate_all_course_lists()  # hapus semua list cache
+course_cache.invalidate_course_detail(id)   # hapus detail cache satu course
+```
+
+---
+
+## Rate Limiting
+
+Diimplementasikan sebagai **Django Middleware** menggunakan **Redis counter**.
+
+- **Limit**: 60 requests per menit per IP address
+- **Algoritma**: Sliding window counter
+- **Exempt**: `/api/docs`, `/admin/`, `/silk/`
+- **Response 429**: Jika limit terlampaui
+
+```json
+// Response HTTP 429
+{
+  "detail": "Rate limit exceeded.",
+  "limit": 60,
+  "window": "60s",
+  "retry_after": 42
+}
+```
+
+### Redis CLI — Monitoring Rate Limit
+
+```bash
+# Lihat semua rate limit keys aktif
+docker exec -it simple-lms-redis-1 redis-cli KEYS "lms:rl:*"
+
+# Lihat count untuk IP tertentu
+docker exec -it simple-lms-redis-1 redis-cli GET "lms:rl:127.0.0.1:28483719"
+
+# Lihat semua course list cache keys
+docker exec -it simple-lms-redis-1 redis-cli KEYS "lms:course_list:*"
+
+# Hapus semua cache (manual)
+docker exec -it simple-lms-redis-1 redis-cli FLUSHDB
+
+# Monitor real-time commands
+docker exec -it simple-lms-redis-1 redis-cli MONITOR
+```
+
+---
+
+## MongoDB Activity Logs
+
+### Collections
+
+| Collection | Tujuan | Contoh Dokumen |
+|---|---|---|
+| `activity_logs` | Setiap aksi user (login, create, enroll) | `{user_id, action, resource_type, timestamp}` |
+| `learning_analytics` | Event belajar (progress, course complete) | `{event_type, course_id, student_id, timestamp}` |
+
+### Events yang Dicatat
+
+| Event | Trigger | Collection |
+|---|---|---|
+| `LOGIN` | `POST /api/auth/login` | activity_logs |
+| `REGISTER` | `POST /api/auth/register` | activity_logs |
+| `CREATE_COURSE` | `POST /api/courses` | activity_logs |
+| `UPDATE_COURSE` | `PATCH /api/courses/{id}` | activity_logs |
+| `DELETE_COURSE` | `DELETE /api/courses/{id}` | activity_logs |
+| `ENROLL` | `POST /api/enrollments` | activity_logs + learning_analytics |
+| `LESSON_COMPLETE` | `POST /api/enrollments/{id}/progress` | learning_analytics |
+| `COURSE_COMPLETE` | Semua lesson selesai | learning_analytics |
+| `EXPORT_REPORT` | `POST /api/reports/courses/{id}` | activity_logs |
+
+### Aggregation Query — Analytics Report
+
+```python
+# services/mongodb.py — get_course_activity_summary(course_id)
+pipeline = [
+    {"$match": {"course_id": course_id}},
+    {"$group": {
+        "_id": "$event_type",
+        "count": {"$sum": 1},
+        "unique_students": {"$addToSet": "$student_id"},
+    }},
+    {"$project": {
+        "event_type": "$_id",
+        "count": 1,
+        "unique_student_count": {"$size": "$unique_students"},
+    }},
+]
+```
+
+**Akses via API**: `GET /api/reports/analytics/{course_id}` (Admin/Instructor)
+
+---
+
+## Celery Async Tasks
+
+### Architecture
+
+```mermaid
+graph LR
+    A[Django Web] -- "task.delay()" --> B[RabbitMQ\nAMQP Broker]
+    B --> C[Celery Worker\n4 concurrency]
+    C -- "result" --> D[Redis\nResult Backend]
+    E[Celery Beat\nScheduler] -- "every 30 min" --> B
+    C --> F[(PostgreSQL)]
+    C --> G[(MongoDB)]
+    C --> H[📁 reports/]
+    I[Flower UI\n:5555] -- monitors --> C
+```
+
+### Task List
+
+| Task | Modul | Trigger | Output |
+|---|---|---|---|
+| `send_enrollment_email` | `tasks/email_tasks.py` | `POST /api/enrollments` | Email ke student |
+| `generate_certificate` | `tasks/certificate_tasks.py` | Semua lesson selesai | HTML certificate di `reports/certificates/` |
+| `update_course_statistics` | `tasks/stats_tasks.py` | **Setiap 30 menit** (Beat) | Enrollment count di Redis |
+| `export_course_report` | `tasks/report_tasks.py` | `POST /api/reports/courses/{id}` | CSV di `reports/exports/` |
+
+### Async CSV Export Flow
+
+```
+POST /api/reports/courses/5
+  └─► export_course_report.delay(course_id=5, user_id=1)
+      └─► Response 202: { "task_id": "abc-123", "status": "PENDING" }
+
+GET /api/reports/tasks/abc-123
+  └─► AsyncResult("abc-123").status
+      └─► Response: { "task_id": "abc-123", "status": "SUCCESS",
+                      "result": { "file": "course_5_report_20250429.csv", "rows": 48 } }
+```
+
+### Flower Monitoring
+
+Akses Celery monitoring UI di: **http://localhost:5555**
+
+Menampilkan:
+- Active workers dan concurrency
+- Task history (SUCCESS / FAILURE / RETRY)
+- Real-time task throughput
+- Worker resource usage
 
 ---
 
 ## Query Optimization
+
 
 ### Lab Endpoints (`/courses/lab/`)
 
@@ -463,11 +657,172 @@ File collection tersedia di root project: **`simple_lms_api.postman_collection.j
 
 | Metrik | Nilai |
 |---|---|
-| Total API Endpoints | **13** |
-| Pydantic Schemas | **16** |
+| Total API Endpoints | **16** (13 core + 3 reports) |
+| Pydantic Schemas | **18** |
 | Django Models | **6** |
 | Role Decorators | **4** (`is_admin`, `is_instructor`, `is_student`, `is_admin_or_instructor`) |
 | Lab Query Endpoints | **6** (3 baseline + 3 optimized) |
 | Query Reduction | **~71%** (7 queries → 2 queries) |
 | Token Expiry (Access) | **60 menit** |
 | Token Expiry (Refresh) | **7 hari** |
+| Redis Cache TTL (Course List) | **5 menit** |
+| Redis Cache TTL (Course Detail) | **10 menit** |
+| Rate Limit | **60 req/menit per IP** |
+| Celery Tasks | **4** (email, certificate, stats, CSV export) |
+| Docker Services | **8** (web, db, redis, mongodb, rabbitmq, worker, beat, flower) |
+| Redis Cache Speed-up (Lab) | **~1003x** (2.003s → 0.002s) |
+
+---
+
+## Redis Caching Lab (Standalone)
+
+Lab mandiri yang mendemonstrasikan konsep Redis caching dari nol, **terpisah dari Django framework**.
+
+### Lokasi File
+
+```
+redis_lab/
+├── weather_api.py     # Implementasi get_weather() dengan Redis cache
+├── test_cache.py      # Testing script 4 skenario + demo Redis commands
+└── cache_report.md    # Dokumentasi lengkap + jawaban refleksi
+```
+
+### Skenario
+
+```python
+# SEBELUM (tanpa cache) — selalu 2 detik
+def get_weather(city):
+    time.sleep(2)  # Simulate slow API
+    return requests.get(f"https://api.example.com/weather/{city}").json()
+
+# SESUDAH (dengan Redis cache) — hanya 2 detik pada first call
+def get_weather(city: str) -> dict:
+    cache_key = f"weather:{city.lower()}"
+
+    cached = redis_client.get(cache_key)        # Redis: GET
+    if cached:
+        return json.loads(cached)               # CACHE HIT: < 0.002s
+
+    data = _fetch_from_api(city)                # CACHE MISS: ~2s
+    redis_client.setex(cache_key, 300, json.dumps(data))  # Redis: SETEX
+    return data
+```
+
+### Hasil Test Performa
+
+```
+-------------------------------------------------------
+  Call                              Time      Sumber
+-------------------------------------------------------
+  1. Jakarta - 1st call (API)    2.003s    API (slow)
+  2. Jakarta - 2nd call (Redis)  0.0020s   CACHE (fast)
+  3. Bali    - 1st call (API)    2.003s    API (slow)
+  4. Bali    - 2nd call (Redis)  0.0011s   CACHE (fast)
+-------------------------------------------------------
+  Speed-up: ~1003x lebih cepat dengan cache!
+  Cache TTL: 300 detik (5 menit)
+```
+
+### Redis Commands yang Digunakan
+
+| Command | Syntax | Fungsi |
+|---|---|---|
+| **GET** | `GET weather:jakarta` | Ambil nilai dari cache |
+| **SETEX** | `SETEX key 300 value` | Simpan + set TTL sekaligus |
+| **TTL** | `TTL weather:jakarta` | Sisa waktu expire → `298s` |
+| **EXISTS** | `EXISTS weather:jakarta` | Cek key ada → `1` |
+| **EXPIRE** | `EXPIRE key 1` | Update TTL |
+| **DEL** | `DEL weather:jakarta` | Hapus cache (invalidation) |
+| **KEYS** | `KEYS weather:*` | List semua cache keys |
+
+### Cara Menjalankan Lab
+
+```bash
+# 1. Start Redis
+docker-compose up redis -d
+
+# 2. Verifikasi
+docker exec simple-lms-redis-1 redis-cli ping   # PONG
+
+# 3. Jalankan test
+python redis_lab/test_cache.py
+
+# 4. Monitor Redis real-time
+docker exec -it simple-lms-redis-1 redis-cli MONITOR
+```
+
+---
+
+## Deliverables Summary
+
+Ringkasan semua deliverable per modul yang telah diimplementasikan:
+
+### Modul 1 — Docker Environment & Data Models
+
+| Deliverable | File | Status |
+|---|---|---|
+| Docker Compose setup | `docker-compose.yml` | ✅ |
+| Custom User model + roles | `core/models.py` | ✅ |
+| Category (self-referencing FK) | `core/models.py` | ✅ |
+| Course + Lesson + Enrollment + Progress | `core/models.py` | ✅ |
+| Django Admin config (TabularInline) | `core/admin.py` | ✅ |
+| Database migrations + fixtures | `core/migrations/`, `core/fixtures/` | ✅ |
+| Custom Manager (select_related) | `core/models.py` | ✅ |
+
+### Modul 2 — REST API + JWT + RBAC
+
+| Deliverable | File | Status |
+|---|---|---|
+| `POST /api/auth/register` | `api/routers/auth_router.py` | ✅ |
+| `POST /api/auth/login` (JWT) | `api/routers/auth_router.py` | ✅ |
+| `POST /api/auth/refresh` | `api/routers/auth_router.py` | ✅ |
+| `GET/PUT /api/auth/me` | `api/routers/auth_router.py` | ✅ |
+| `GET /api/courses` (pagination + filter) | `api/routers/course_router.py` | ✅ |
+| `POST /api/courses` (Instructor only) | `api/routers/course_router.py` | ✅ |
+| `PATCH /api/courses/{id}` (Owner only) | `api/routers/course_router.py` | ✅ |
+| `DELETE /api/courses/{id}` (Admin only) | `api/routers/course_router.py` | ✅ |
+| `POST /api/enrollments` (Student) | `api/routers/enrollment_router.py` | ✅ |
+| `GET /api/enrollments/my-courses` | `api/routers/enrollment_router.py` | ✅ |
+| `POST /api/enrollments/{id}/progress` | `api/routers/enrollment_router.py` | ✅ |
+| JWT token generation (access + refresh) | `api/auth.py` | ✅ |
+| Password hashing (bcrypt) | `api/routers/auth_router.py` | ✅ |
+| Role decorators (`@is_instructor`, dll) | `api/auth.py` | ✅ |
+| Ownership validation | `api/routers/course_router.py` | ✅ |
+| 18 Pydantic schemas | `api/schemas.py` | ✅ |
+| Swagger UI di `/api/docs` | `api/main.py` | ✅ |
+| Postman Collection | `simple_lms_api.postman_collection.json` | ✅ |
+
+### Modul 3 — Redis + MongoDB + Celery
+
+| Deliverable | File | Status |
+|---|---|---|
+| Course list caching (TTL 5 menit) | `services/cache.py` | ✅ |
+| Course detail caching (TTL 10 menit) | `services/cache.py` | ✅ |
+| Cache invalidation strategy | `services/cache.py` | ✅ |
+| Rate limiting 60 req/menit | `services/rate_limiter.py` | ✅ |
+| MongoDB activity_logs collection | `services/mongodb.py` | ✅ |
+| MongoDB learning_analytics collection | `services/mongodb.py` | ✅ |
+| MongoDB aggregation queries | `services/mongodb.py` | ✅ |
+| `send_enrollment_email` Celery task | `tasks/email_tasks.py` | ✅ |
+| `generate_certificate` Celery task | `tasks/certificate_tasks.py` | ✅ |
+| `update_course_statistics` (scheduled) | `tasks/stats_tasks.py` | ✅ |
+| `export_course_report` CSV async | `tasks/report_tasks.py` | ✅ |
+| Docker Compose (8 services) | `docker-compose.yml` | ✅ |
+| Flower monitoring UI `:5555` | `docker-compose.yml` | ✅ |
+| `POST /api/reports/courses/{id}` | `api/routers/reports_router.py` | ✅ |
+| `GET /api/reports/tasks/{id}` | `api/routers/reports_router.py` | ✅ |
+| `GET /api/reports/analytics/{id}` | `api/routers/reports_router.py` | ✅ |
+
+### Modul 4 — Redis Caching Lab (Standalone)
+
+| Deliverable | File | Status |
+|---|---|---|
+| `weather_api.py` dengan Redis cache | `redis_lab/weather_api.py` | ✅ |
+| Cache-Aside pattern implementation | `redis_lab/weather_api.py` | ✅ |
+| Redis operasi: GET, SETEX, TTL, EXISTS, DEL | `redis_lab/weather_api.py` | ✅ |
+| `test_cache.py` testing script | `redis_lab/test_cache.py` | ✅ |
+| First call: ~2.003s (API) | Verified via test | ✅ |
+| Second call: ~0.002s (Cache) | Verified via test | ✅ |
+| Speed-up: ~1003x | Verified via test | ✅ |
+| Cache expiry simulation | `redis_lab/test_cache.py` | ✅ |
+| `cache_report.md` dokumentasi | `redis_lab/cache_report.md` | ✅ |

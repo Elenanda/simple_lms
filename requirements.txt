@@ -5,3 +5,17 @@ django-ninja==1.6.2
 PyJWT==2.9.0
 bcrypt==4.2.0
 email-validator==2.3.0
+
+# Redis Caching
+redis==5.0.8
+django-redis==5.4.0
+
+# MongoDB
+pymongo==4.7.3
+
+# Celery + RabbitMQ
+celery==5.3.6
+kombu==5.3.4
+
+# Celery Monitoring
+flower==2.0.1

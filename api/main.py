@@ -11,13 +11,14 @@ from ninja.errors import HttpError, ValidationError
 from api.routers.auth_router import router as auth_router
 from api.routers.course_router import router as course_router
 from api.routers.enrollment_router import router as enrollment_router
+from api.routers.reports_router import router as reports_router
 
 # ─────────────────────────────────────────────
 # Inisialisasi NinjaAPI
 # ─────────────────────────────────────────────
 api = NinjaAPI(
     title="Simple LMS REST API",
-    version="1.0.0",
+    version="2.0.0",
     description="""
 ## 🎓 Simple LMS REST API
 
@@ -25,8 +26,11 @@ REST API lengkap untuk Learning Management System dengan:
 
 - **JWT Authentication** — Access + Refresh token
 - **Role-Based Access Control** — Admin, Instructor, Student
+- **Redis Caching** — Course list (5 min) & detail (10 min)
+- **Rate Limiting** — 60 requests/menit per IP
+- **Celery Async Tasks** — Email, Certificate, CSV Export via RabbitMQ
+- **MongoDB Logging** — Activity logs & learning analytics
 - **Pagination & Filtering** — Pada endpoint listing course
-- **Ownership Validation** — Instructor hanya bisa edit course miliknya sendiri
 
 ### 🔐 Cara Autentikasi
 1. Register via `POST /api/auth/register`
@@ -43,6 +47,7 @@ REST API lengkap untuk Learning Management System dengan:
 api.add_router("/auth", auth_router)
 api.add_router("/courses", course_router)
 api.add_router("/enrollments", enrollment_router)
+api.add_router("/reports", reports_router)
 
 
 # ─────────────────────────────────────────────

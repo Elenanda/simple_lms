@@ -45,7 +45,8 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    'silk.middleware.SilkyMiddleware', # Pindahkan ke paling atas!
+    'silk.middleware.SilkyMiddleware',
+    'services.rate_limiter.RateLimitMiddleware',  # Redis-based rate limiting
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -160,3 +161,67 @@ SILKY_MAX_RECORDED_REQUESTS = 10_000  # Simpan hingga 10.000 request
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = 60   # 1 jam
 JWT_REFRESH_TOKEN_EXPIRE_DAYS   = 7    # 7 hari
 JWT_ALGORITHM = 'HS256'
+
+
+# ============================================================
+# Redis — Cache Backend
+# ============================================================
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django_redis.cache.RedisCache',
+        'LOCATION': REDIS_URL,
+        'OPTIONS': {
+            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            'SOCKET_CONNECT_TIMEOUT': 5,
+            'SOCKET_TIMEOUT': 5,
+            'IGNORE_EXCEPTIONS': True,  # Graceful degradation jika Redis down
+        },
+        'KEY_PREFIX': 'lms',
+        'TIMEOUT': 300,  # Default TTL: 5 menit
+    }
+}
+
+# Rate Limiting (via RateLimitMiddleware)
+RATE_LIMIT_REQUESTS = int(os.environ.get('RATE_LIMIT_REQUESTS', 60))  # per menit
+RATE_LIMIT_WINDOW   = int(os.environ.get('RATE_LIMIT_WINDOW', 60))    # detik
+
+
+# ============================================================
+# Celery — Async Task Queue
+# ============================================================
+CELERY_BROKER_URL    = os.environ.get('RABBITMQ_URL', 'amqp://guest:guest@localhost:5672/')
+CELERY_RESULT_BACKEND = REDIS_URL
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = 'UTC'
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 30 * 60        # Hard limit: 30 menit
+CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # Soft limit: 25 menit
+
+
+# ============================================================
+# MongoDB — Activity Logs & Analytics
+# ============================================================
+MONGODB_URI = os.environ.get('MONGODB_URI', 'mongodb://localhost:27017/')
+MONGODB_DB  = os.environ.get('MONGODB_DB', 'simple_lms_logs')
+
+
+# ============================================================
+# Email Configuration
+# ============================================================
+EMAIL_BACKEND   = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+EMAIL_HOST      = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT      = int(os.environ.get('EMAIL_PORT', 587))
+EMAIL_USE_TLS   = True
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@simplelms.dev')
+
+
+# ============================================================
+# Reports — lokasi penyimpanan file generated
+# ============================================================
+REPORTS_DIR = BASE_DIR / 'reports'

@@ -1,6 +1,8 @@
 version: '3.8'
 
 services:
+
+  # ─── PostgreSQL ───────────────────────────────────────────────
   db:
     image: postgres:15-alpine
     restart: always
@@ -10,18 +12,131 @@ services:
       POSTGRES_DB: ${DB_NAME}
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
+  # ─── Redis (Cache + Celery Result Backend) ────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── MongoDB (Activity Logs & Analytics) ─────────────────────
+  mongodb:
+    image: mongo:7
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGODB_DB:-simple_lms_logs}
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ─── RabbitMQ (Message Broker untuk Celery) ───────────────────
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    restart: always
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # Management UI → http://localhost:15672
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-lms_user}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-lms_password}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ─── Django Web App ───────────────────────────────────────────
   web:
     build: .
     command: python manage.py runserver 0.0.0.0:8000
     volumes:
       - .:/app
+      - reports_data:/app/reports
     ports:
       - "8000:8000"
     env_file:
       - .env
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # ─── Celery Worker ────────────────────────────────────────────
+  celery-worker:
+    build: .
+    command: celery -A config worker --loglevel=info --concurrency=4 -Q default
+    volumes:
+      - .:/app
+      - reports_data:/app/reports
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: always
+
+  # ─── Celery Beat (Scheduled Tasks) ───────────────────────────
+  celery-beat:
+    build: .
+    command: celery -A config beat --loglevel=info
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: always
+
+  # ─── Flower (Celery Monitoring UI) ───────────────────────────
+  flower:
+    build: .
+    command: celery -A config flower --port=5555 --broker=${RABBITMQ_URL}
+    ports:
+      - "5555:5555"    # Flower UI → http://localhost:5555
+    env_file:
+      - .env
+    depends_on:
+      - rabbitmq
+      - redis
+    restart: always
 
 volumes:
   postgres_data:
+  redis_data:
+  mongo_data:
+  rabbitmq_data:
+  reports_data:
