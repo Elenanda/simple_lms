@@ -79,3 +79,24 @@ def invalidate_course(course_id: int):
     """Shortcut: hapus detail + semua list cache untuk satu course."""
     invalidate_course_detail(course_id)
     invalidate_all_course_lists()
+
+
+# ─── Token Blacklist (Logout) ──────────────────────
+BLACKLIST_PREFIX = "blacklist:token:"
+
+
+def blacklist_token(jti: str, ttl_seconds: int) -> None:
+    """
+    Masukkan token ke blacklist Redis.
+
+    Args:
+        jti         : unik identifier token (field 'jti' di payload, atau token hash)
+        ttl_seconds : sisa waktu hidup token dalam detik
+    """
+    key = f"{BLACKLIST_PREFIX}{jti}"
+    cache.set(key, 1, timeout=max(ttl_seconds, 1))
+
+
+def is_token_blacklisted(jti: str) -> bool:
+    """Return True jika token sudah di-blacklist (sudah logout)."""
+    return cache.get(f"{BLACKLIST_PREFIX}{jti}") is not None

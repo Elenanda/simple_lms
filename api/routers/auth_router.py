@@ -5,11 +5,13 @@ Endpoints untuk Authentication & User Profile
 POST /api/auth/register   - Daftar akun baru
 POST /api/auth/login      - Login → JWT tokens
 POST /api/auth/refresh    - Refresh access token
+POST /api/auth/logout     - Logout & blacklist token
 GET  /api/auth/me         - Profil saya
 PUT  /api/auth/me         - Update profil
 """
 
 import bcrypt
+from datetime import datetime, timezone
 from django.http import HttpRequest
 from ninja import Router
 from ninja.errors import HttpError
@@ -128,3 +130,45 @@ def update_me(request: HttpRequest, data: UpdateProfileIn):
         user.email = data.email
     user.save(update_fields=["first_name", "last_name", "email"])
     return user
+
+
+# ─────────────────────────────────────────────
+# POST /logout
+# ─────────────────────────────────────────────
+@router.post("/logout", response=MessageOut, auth=jwt_auth)
+def logout(request: HttpRequest):
+    """
+    Logout user dengan mem-blacklist access token saat ini.
+    Token akan ditolak pada semua request berikutnya meskipun belum expired.
+    Gunakan header: `Authorization: Bearer <access_token>`
+    """
+    # Ambil token dari header Authorization
+    auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+    token = auth_header.replace("Bearer ", "").strip()
+
+    if token:
+        payload = decode_token(token)
+        if payload:
+            jti = payload.get("jti")
+            exp = payload.get("exp", 0)
+            if jti:
+                now_ts = int(datetime.now(timezone.utc).timestamp())
+                remaining_ttl = max(exp - now_ts, 1)
+                try:
+                    from services.cache import blacklist_token
+                    blacklist_token(jti, remaining_ttl)
+                except Exception:
+                    pass  # Graceful degrade jika Redis tidak tersedia
+
+    # Log activity logout ke MongoDB
+    try:
+        from services.mongodb import log_activity
+        log_activity(
+            user_id=request.auth.pk,
+            action="LOGOUT",
+            resource_type="auth",
+        )
+    except Exception:
+        pass
+
+    return MessageOut(message="Logout berhasil. Token telah dinonaktifkan.")

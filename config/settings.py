@@ -147,6 +147,11 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 AUTH_USER_MODEL = 'core.User'
 
+AUTHENTICATION_BACKENDS = [
+    'core.backends.BcryptBackend',
+    'django.contrib.auth.backends.ModelBackend',
+]
+
 # ============================================================
 # Django Silk - Query Profiling Configuration
 # ============================================================
@@ -183,8 +188,9 @@ CACHES = {
     }
 }
 
-# Rate Limiting (via RateLimitMiddleware)
-RATE_LIMIT_REQUESTS = int(os.environ.get('RATE_LIMIT_REQUESTS', 60))  # per menit
+import sys
+TESTING = len(sys.argv) > 1 and sys.argv[1] == 'test'
+RATE_LIMIT_REQUESTS = int(os.environ.get('RATE_LIMIT_REQUESTS', 999999 if TESTING else 60))  # per menit
 RATE_LIMIT_WINDOW   = int(os.environ.get('RATE_LIMIT_WINDOW', 60))    # detik
 
 

@@ -12,6 +12,7 @@ from api.routers.auth_router import router as auth_router
 from api.routers.course_router import router as course_router
 from api.routers.enrollment_router import router as enrollment_router
 from api.routers.reports_router import router as reports_router
+from api.routers.admin_router import router as admin_router
 
 # ─────────────────────────────────────────────
 # Inisialisasi NinjaAPI
@@ -48,6 +49,7 @@ api.add_router("/auth", auth_router)
 api.add_router("/courses", course_router)
 api.add_router("/enrollments", enrollment_router)
 api.add_router("/reports", reports_router)
+api.add_router("/admin", admin_router)
 
 
 # ─────────────────────────────────────────────

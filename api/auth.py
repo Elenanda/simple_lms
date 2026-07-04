@@ -1,12 +1,13 @@
 """
 api/auth.py
 JWT Authentication & Authorization Utilities
-- Token generation (access + refresh)
-- Bearer token extraction & validation
+- Token generation (access + refresh) — dengan 'jti' untuk blacklist
+- Bearer token extraction & validasi
 - Role-based decorators: @is_admin, @is_instructor, @is_student
 """
 
 import jwt
+import uuid
 import functools
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -30,10 +31,11 @@ ALGORITHM = "HS256"
 # Token Helpers
 # ─────────────────────────────────────────────
 def create_access_token(user_id: int) -> str:
-    """Buat JWT access token dengan expiry 1 jam."""
+    """Buat JWT access token dengan expiry 1 jam + jti unik."""
     payload = {
         "sub": str(user_id),
         "type": "access",
+        "jti": str(uuid.uuid4()),
         "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
         "iat": datetime.now(timezone.utc),
     }
@@ -41,10 +43,11 @@ def create_access_token(user_id: int) -> str:
 
 
 def create_refresh_token(user_id: int) -> str:
-    """Buat JWT refresh token dengan expiry 7 hari."""
+    """Buat JWT refresh token dengan expiry 7 hari + jti unik."""
     payload = {
         "sub": str(user_id),
         "type": "refresh",
+        "jti": str(uuid.uuid4()),
         "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
         "iat": datetime.now(timezone.utc),
     }
@@ -80,9 +83,28 @@ class JWTAuth(HttpBearer):
     """
     Django Ninja authentication backend.
     Validasi header: Authorization: Bearer <token>
+    Juga mengecek token blacklist (logout).
     """
     def authenticate(self, request: HttpRequest, token: str) -> Optional[User]:
-        user = get_user_from_token(token)
+        payload = decode_token(token)
+        if not payload or payload.get("type") != "access":
+            return None
+
+        # Cek blacklist (token sudah di-logout)
+        jti = payload.get("jti")
+        if jti:
+            try:
+                from services.cache import is_token_blacklisted
+                if is_token_blacklisted(jti):
+                    return None  # Token sudah di-revoke
+            except Exception:
+                pass  # Graceful degrade jika Redis tidak tersedia
+
+        try:
+            user = User.objects.get(pk=int(payload["sub"]))
+        except (User.DoesNotExist, ValueError, KeyError):
+            return None
+
         if user and user.is_active:
             return user
         return None

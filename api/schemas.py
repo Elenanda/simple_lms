@@ -6,7 +6,7 @@ Menggunakan Pydantic v2 (bundled dengan django-ninja 1.x)
 
 from datetime import datetime
 from typing import Optional, List, Any
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 # ─────────────────────────────────────────────
@@ -153,6 +153,31 @@ class ProgressOut(BaseModel):
 
 
 # ─────────────────────────────────────────────
+# Lesson Schemas
+# ─────────────────────────────────────────────
+class LessonOut(BaseModel):
+    id: int
+    title: str
+    content: str
+    order: int
+    course_id: int
+
+    model_config = {"from_attributes": True}
+
+
+class LessonIn(BaseModel):
+    title: str = Field(..., min_length=3, max_length=200, examples=["Pengenalan Python"])
+    content: str = Field(..., min_length=10, examples=["Pada lesson ini kita akan belajar..."])
+    order: int = Field(default=0, ge=0, examples=[1])
+
+
+class LessonUpdateIn(BaseModel):
+    title: Optional[str] = Field(None, min_length=3, max_length=200)
+    content: Optional[str] = Field(None, min_length=10)
+    order: Optional[int] = Field(None, ge=0)
+
+
+# ─────────────────────────────────────────────
 # Generic Schemas
 # ─────────────────────────────────────────────
 class MessageOut(BaseModel):
@@ -178,3 +203,46 @@ class CourseAnalyticsOut(BaseModel):
     course_id: int
     course_title: str
     analytics: dict  # {event_type: {count, students}}
+
+
+# ─────────────────────────────────────────────
+# Admin Schemas
+# ─────────────────────────────────────────────
+class AdminUserOut(BaseModel):
+    """User detail untuk admin view (termasuk is_active)."""
+    id: int
+    username: str
+    email: str
+    role: str
+    first_name: str
+    last_name: str
+    is_active: bool
+    date_joined: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AdminUserUpdate(BaseModel):
+    """Payload untuk admin update user (role dan/atau is_active)."""
+    role: Optional[str] = Field(None, examples=["student"])
+    is_active: Optional[bool] = None
+
+    @field_validator("role")
+    @classmethod
+    def role_must_be_valid(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        allowed = {"admin", "instructor", "student"}
+        if v not in allowed:
+            raise ValueError(f"Role harus salah satu dari: {', '.join(allowed)}")
+        return v
+
+
+class ActivityLogOut(BaseModel):
+    """Satu entry activity log dari MongoDB."""
+    user_id: int
+    action: str
+    resource_type: str
+    resource_id: Optional[int] = None
+    metadata: dict = {}
+    timestamp: datetime

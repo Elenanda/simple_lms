@@ -1,12 +1,17 @@
 """
 api/routers/course_router.py
-Endpoints untuk manajemen Course — dengan Redis Caching
+Endpoints untuk manajemen Course & Lesson — dengan Redis Caching
 
-GET  /api/courses             - List courses (publik, pagination + filter) [CACHED 5 min]
-GET  /api/courses/{id}        - Detail course (publik)                      [CACHED 10 min]
-POST /api/courses             - Buat course (Instructor only)               [Invalidate cache]
-PATCH /api/courses/{id}       - Update course (Owner only)                  [Invalidate cache]
-DELETE /api/courses/{id}      - Hapus course (Admin only)                   [Invalidate cache]
+GET  /api/courses                           - List courses (publik, pagination + filter) [CACHED 5 min]
+GET  /api/courses/{id}                      - Detail course (publik)                      [CACHED 10 min]
+POST /api/courses                           - Buat course (Instructor only)               [Invalidate cache]
+PATCH /api/courses/{id}                     - Update course (Owner only)                  [Invalidate cache]
+DELETE /api/courses/{id}                    - Hapus course (Admin only)                   [Invalidate cache]
+
+GET  /api/courses/{id}/lessons              - List lesson dalam course (publik)
+POST /api/courses/{id}/lessons              - Tambah lesson (Instructor owner)
+PATCH /api/courses/{id}/lessons/{lesson_id} - Update lesson (Instructor owner)
+DELETE /api/courses/{id}/lessons/{lesson_id}- Hapus lesson (Instructor owner)
 
 Caching Strategy:
   - Cache miss  → query DB → serialize → simpan ke Redis
@@ -14,17 +19,18 @@ Caching Strategy:
   - Invalidasi  → hapus key terkait pada write operations
 """
 
-from typing import Optional
+from typing import Optional, List
 from django.http import HttpRequest
 from django.db.models import Count
 from ninja import Router, Query
 from ninja.errors import HttpError
 
-from core.models import Course, Category
+from core.models import Course, Category, Lesson
 from api.auth import jwt_auth, is_instructor, is_admin
 from api.schemas import (
     CourseIn, CourseUpdateIn, CourseOut, CourseListOut,
     PaginatedCourseOut, MessageOut,
+    LessonIn, LessonOut, LessonUpdateIn,
 )
 from services import cache as course_cache
 from services.mongodb import log_activity
@@ -235,3 +241,143 @@ def delete_course(request: HttpRequest, course_id: int):
     )
 
     return MessageOut(message=f"Course '{title}' berhasil dihapus.")
+
+
+# ─────────────────────────────────────────────
+# GET /courses/{id}/lessons — Publik
+# ─────────────────────────────────────────────
+@router.get("/{course_id}/lessons", response=List[LessonOut], auth=None)
+def list_lessons(request: HttpRequest, course_id: int):
+    """
+    Daftar semua lesson dalam sebuah course, diurutkan berdasarkan `order`.
+    Endpoint ini **publik** (tidak perlu login).
+    """
+    try:
+        Course.objects.get(pk=course_id)
+    except Course.DoesNotExist:
+        raise HttpError(404, "Course tidak ditemukan.")
+
+    lessons = Lesson.objects.filter(course_id=course_id).order_by("order", "id")
+    return list(lessons)
+
+
+# ─────────────────────────────────────────────
+# POST /courses/{id}/lessons — Instructor (owner) only
+# ─────────────────────────────────────────────
+@router.post("/{course_id}/lessons", response={201: LessonOut}, auth=jwt_auth)
+@is_instructor
+def create_lesson(request: HttpRequest, course_id: int, data: LessonIn):
+    """
+    Tambahkan lesson baru ke dalam course.
+    **Hanya instructor pemilik** course yang dapat menambahkan lesson.
+    """
+    try:
+        course = Course.objects.get(pk=course_id)
+    except Course.DoesNotExist:
+        raise HttpError(404, "Course tidak ditemukan.")
+
+    if course.instructor_id != request.auth.pk:
+        raise HttpError(403, "Anda bukan pemilik course ini.")
+
+    lesson = Lesson.objects.create(
+        course=course,
+        title=data.title,
+        content=data.content,
+        order=data.order,
+    )
+
+    log_activity(
+        user_id=request.auth.pk,
+        action="CREATE_LESSON",
+        resource_type="lesson",
+        resource_id=lesson.pk,
+        metadata={"course_id": course_id, "title": lesson.title},
+    )
+
+    return 201, lesson
+
+
+# ─────────────────────────────────────────────
+# PATCH /courses/{id}/lessons/{lesson_id} — Instructor (owner) only
+# ─────────────────────────────────────────────
+@router.patch("/{course_id}/lessons/{lesson_id}", response=LessonOut, auth=jwt_auth)
+@is_instructor
+def update_lesson(request: HttpRequest, course_id: int, lesson_id: int, data: LessonUpdateIn):
+    """
+    Update lesson (judul, konten, urutan).
+    **Hanya instructor pemilik** course ini.
+    """
+    try:
+        course = Course.objects.get(pk=course_id)
+    except Course.DoesNotExist:
+        raise HttpError(404, "Course tidak ditemukan.")
+
+    if course.instructor_id != request.auth.pk:
+        raise HttpError(403, "Anda bukan pemilik course ini.")
+
+    try:
+        lesson = Lesson.objects.get(pk=lesson_id, course=course)
+    except Lesson.DoesNotExist:
+        raise HttpError(404, f"Lesson id={lesson_id} tidak ditemukan di course ini.")
+
+    updated_fields = []
+    if data.title is not None:
+        lesson.title = data.title
+        updated_fields.append("title")
+    if data.content is not None:
+        lesson.content = data.content
+        updated_fields.append("content")
+    if data.order is not None:
+        lesson.order = data.order
+        updated_fields.append("order")
+
+    if updated_fields:
+        lesson.save(update_fields=updated_fields)
+
+    log_activity(
+        user_id=request.auth.pk,
+        action="UPDATE_LESSON",
+        resource_type="lesson",
+        resource_id=lesson_id,
+        metadata={"course_id": course_id, "updated_fields": updated_fields},
+    )
+
+    return lesson
+
+
+# ─────────────────────────────────────────────
+# DELETE /courses/{id}/lessons/{lesson_id} — Instructor (owner) only
+# ─────────────────────────────────────────────
+@router.delete("/{course_id}/lessons/{lesson_id}", response=MessageOut, auth=jwt_auth)
+@is_instructor
+def delete_lesson(request: HttpRequest, course_id: int, lesson_id: int):
+    """
+    Hapus lesson dari course.
+    **Hanya instructor pemilik** course ini.
+    Progress terkait lesson ini akan ikut terhapus (cascade).
+    """
+    try:
+        course = Course.objects.get(pk=course_id)
+    except Course.DoesNotExist:
+        raise HttpError(404, "Course tidak ditemukan.")
+
+    if course.instructor_id != request.auth.pk:
+        raise HttpError(403, "Anda bukan pemilik course ini.")
+
+    try:
+        lesson = Lesson.objects.get(pk=lesson_id, course=course)
+    except Lesson.DoesNotExist:
+        raise HttpError(404, f"Lesson id={lesson_id} tidak ditemukan di course ini.")
+
+    title = lesson.title
+    lesson.delete()
+
+    log_activity(
+        user_id=request.auth.pk,
+        action="DELETE_LESSON",
+        resource_type="lesson",
+        resource_id=lesson_id,
+        metadata={"course_id": course_id, "title": title},
+    )
+
+    return MessageOut(message=f"Lesson '{title}' berhasil dihapus.")
