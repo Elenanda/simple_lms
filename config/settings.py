@@ -190,7 +190,10 @@ CACHES = {
 
 import sys
 TESTING = len(sys.argv) > 1 and sys.argv[1] == 'test'
-RATE_LIMIT_REQUESTS = int(os.environ.get('RATE_LIMIT_REQUESTS', 999999 if TESTING else 60))  # per menit
+if TESTING:
+    RATE_LIMIT_REQUESTS = 999999
+else:
+    RATE_LIMIT_REQUESTS = int(os.environ.get('RATE_LIMIT_REQUESTS', 60))  # per menit
 RATE_LIMIT_WINDOW   = int(os.environ.get('RATE_LIMIT_WINDOW', 60))    # detik
 
 
